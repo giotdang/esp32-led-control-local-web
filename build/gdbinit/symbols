@@ -1,0 +1,9 @@
+
+
+# Load bootloader symbols
+set confirm off
+    add-symbol-file /home/quangvuanh/esp32-blink/build/bootloader/bootloader.elf
+set confirm on
+
+# Load application symbols
+file /home/quangvuanh/esp32-blink/build/blink_example.elf

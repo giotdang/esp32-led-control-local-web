@@ -1,0 +1,2 @@
+source /home/quangvuanh/esp32-blink/build/bootloader/gdbinit/symbols
+source /home/quangvuanh/esp32-blink/build/bootloader/gdbinit/connect
