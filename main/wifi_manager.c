@@ -223,6 +223,7 @@ esp_err_t wifi_manager_sta_connect(const wifi_creds_t *creds, int timeout_ms)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_connect());
 
     // Wait for either GOT_IP or DISCONNECTED
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
