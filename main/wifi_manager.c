@@ -10,6 +10,61 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 
+/* Wi-Fi disconnect reason codes (from esp_wifi_types.h) */
+#define REASON_UNSPECIFIED              1
+#define REASON_AUTH_EXPIRE              2
+#define REASON_AUTH_LEAVE               3
+#define REASON_ASSOC_EXPIRE             4
+#define REASON_ASSOC_TOOMANY            5
+#define REASON_NOT_AUTHED               6
+#define REASON_NOT_ASSOCED              7
+#define REASON_ASSOC_LEAVE              8
+#define REASON_ASSOC_NOT_AUTHED         9
+#define REASON_DISASSOC_PWRCAP_BAD      10
+#define REASON_DISASSOC_SUPCHAN_BAD     11
+#define REASON_IE_INVALID               13
+#define REASON_MIC_FAILURE              14
+#define REASON_4WAY_HANDSHAKE_TIMEOUT   15
+#define REASON_GROUP_KEY_UPDATE_TIMEOUT 16
+#define REASON_IE_IN_4WAY_DIFFERS       17
+#define REASON_GROUP_CIPHER_INVALID     18
+#define REASON_PAIRWISE_CIPHER_INVALID  19
+#define REASON_AKMP_INVALID             20
+#define REASON_UNSUPP_RSN_IE_VERSION    21
+#define REASON_INVALID_RSN_IE_CAP       22
+#define REASON_802_1X_AUTH_FAILED       23
+#define REASON_CIPHER_SUITE_REJECTED    24
+#define REASON_BEACON_TIMEOUT           200
+#define REASON_NO_AP_FOUND              201
+#define REASON_AUTH_FAIL                202
+#define REASON_ASSOC_FAIL               203
+#define REASON_HANDSHAKE_TIMEOUT        204
+
+static const char *wifi_reason_str(uint8_t reason)
+{
+    switch (reason) {
+        case REASON_UNSPECIFIED:              return "UNSPECIFIED";
+        case REASON_AUTH_EXPIRE:             return "AUTH_EXPIRE";
+        case REASON_NOT_AUTHED:              return "NOT_AUTHED";
+        case REASON_4WAY_HANDSHAKE_TIMEOUT:  return "4WAY_HANDSHAKE_TIMEOUT";
+        case REASON_GROUP_KEY_UPDATE_TIMEOUT:return "GROUP_KEY_UPDATE_TIMEOUT";
+        case REASON_IE_IN_4WAY_DIFFERS:      return "IE_IN_4WAY_DIFFERS";
+        case REASON_GROUP_CIPHER_INVALID:    return "GROUP_CIPHER_INVALID";
+        case REASON_PAIRWISE_CIPHER_INVALID: return "PAIRWISE_CIPHER_INVALID";
+        case REASON_AKMP_INVALID:            return "AKMP_INVALID";
+        case REASON_UNSUPP_RSN_IE_VERSION:   return "UNSUPP_RSN_IE_VERSION";
+        case REASON_INVALID_RSN_IE_CAP:      return "INVALID_RSN_IE_CAP";
+        case REASON_802_1X_AUTH_FAILED:      return "802_1X_AUTH_FAILED";
+        case REASON_CIPHER_SUITE_REJECTED:   return "CIPHER_SUITE_REJECTED";
+        case REASON_BEACON_TIMEOUT:          return "BEACON_TIMEOUT (AP not found)";
+        case REASON_NO_AP_FOUND:             return "NO_AP_FOUND";
+        case REASON_AUTH_FAIL:               return "AUTH_FAIL (wrong password?)";
+        case REASON_ASSOC_FAIL:              return "ASSOC_FAIL";
+        case REASON_HANDSHAKE_TIMEOUT:       return "HANDSHAKE_TIMEOUT (wrong password?)";
+        default:                             return "OTHER";
+    }
+}
+
 #include "wifi_manager.h"
 
 static const char *TAG = "WIFI_MGR";
@@ -89,7 +144,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         xEventGroupSetBits(wifi_event_group, STA_CONNECTED_BIT);
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "STA disconnected");
+        wifi_event_sta_disconnected_t *evt = (wifi_event_sta_disconnected_t *)event_data;
+        ESP_LOGW(TAG, "STA disconnected (reason %d: %s)",
+                 evt->reason, wifi_reason_str(evt->reason));
         sta_connected = false;
         sta_ip_str[0] = '\0';
         xEventGroupSetBits(wifi_event_group, STA_FAIL_BIT);
@@ -159,13 +216,13 @@ esp_err_t wifi_manager_sta_connect(const wifi_creds_t *creds, int timeout_ms)
     memcpy(wifi_config.sta.ssid, creds->ssid, strlen(creds->ssid));
     memcpy(wifi_config.sta.password, creds->password, strlen(creds->password));
 
+    // Clear event bits before starting (not after, to avoid race)
+    xEventGroupClearBits(wifi_event_group,
+        STA_CONNECTED_BIT | STA_GOT_IP_BIT | STA_FAIL_BIT);
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-
-    // Clear event bits before waiting
-    xEventGroupClearBits(wifi_event_group,
-        STA_CONNECTED_BIT | STA_GOT_IP_BIT | STA_FAIL_BIT);
 
     // Wait for either GOT_IP or DISCONNECTED
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
@@ -188,8 +245,12 @@ esp_err_t wifi_manager_sta_connect(const wifi_creds_t *creds, int timeout_ms)
 
 esp_err_t wifi_manager_start_ap(void)
 {
-    esp_netif_t *netif = esp_netif_create_default_wifi_ap();
-    if (!netif) return ESP_ERR_NO_MEM;
+    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
+    if (!ap_netif) return ESP_ERR_NO_MEM;
+
+    /* Also create STA netif so scanning works while in AP mode */
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+    if (!sta_netif) return ESP_ERR_NO_MEM;
 
     wifi_config_t ap_config = {
         .ap = {
@@ -201,7 +262,7 @@ esp_err_t wifi_manager_start_ap(void)
     };
     memcpy(ap_config.ap.ssid, WIFI_AP_SSID, strlen(WIFI_AP_SSID));
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -217,16 +278,11 @@ char *wifi_manager_scan_networks(void)
     uint16_t ap_count = 0;
     wifi_ap_record_t *ap_list = NULL;
 
-    // Temporarily set STA mode for scanning
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
-
     esp_wifi_scan_start(NULL, true);
     esp_wifi_scan_get_ap_num(&ap_count);
     if (ap_count == 0) {
         esp_wifi_scan_stop();
-        char *empty = strdup("[]");
-        return empty;
+        return strdup("[]");
     }
 
     ap_list = malloc(ap_count * sizeof(wifi_ap_record_t));
@@ -237,14 +293,14 @@ char *wifi_manager_scan_networks(void)
 
     esp_wifi_scan_get_ap_records(&ap_count, ap_list);
 
-    // Build JSON array
+    /* Build JSON array */
     size_t buf_size = ap_count * 64 + 4;
     char *json = malloc(buf_size);
     if (!json) { free(ap_list); esp_wifi_scan_stop(); return strdup("[]"); }
 
     strcpy(json, "[");
     for (int i = 0; i < ap_count; i++) {
-        char entry[96];
+        char entry[128];
         snprintf(entry, sizeof(entry),
             "{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":%d}%s",
             ap_list[i].ssid,

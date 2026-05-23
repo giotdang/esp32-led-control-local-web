@@ -9,12 +9,16 @@ body{font-family:Arial,sans-serif;max-width:500px;margin:40px auto;padding:20px;
 .card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 12px rgba(0,0,0,0.1)}
 h1{text-align:center;color:#1a1a2e;margin-top:0}
 h2{color:#16213e;font-size:16px;margin-bottom:8px}
-select,input[type=password]{width:100%;padding:12px;margin:6px 0 16px;border:2px solid #e0e0e0;border-radius:8px;font-size:15px;box-sizing:border-box}
-select:focus,input:focus{border-color:#0f3460;outline:none}
+select{width:100%;padding:12px;margin:6px 0 16px;border:2px solid #e0e0e0;border-radius:8px;font-size:15px;box-sizing:border-box}
+select:focus{border-color:#0f3460;outline:none}
+.pw-wrap{position:relative;margin-bottom:16px}
+.pw-wrap input{width:100%;padding:12px;padding-right:44px;border:2px solid #e0e0e0;border-radius:8px;font-size:15px;box-sizing:border-box}
+.pw-wrap input:focus{border-color:#0f3460;outline:none}
+.toggle-pw{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;font-size:20px;cursor:pointer;padding:4px;line-height:1;color:#888;width:auto;border-radius:0}
+.toggle-pw:hover{color:#333;background:none}
 button{width:100%;padding:14px;background:#0f3460;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:bold;cursor:pointer}
 button:hover{background:#1a5276}
-.status{text-align:center;color:#666;margin-top:12px;font-size:13px}
-.rssi{color:#888;font-size:12px}
+.status{text-align:center;color:#666;margin-top:12px;font-size:13px},
 </style>
 </head>
 <body>
@@ -26,7 +30,10 @@ button:hover{background:#1a5276}
 <option value="">-- Scanning networks... --</option>
 </select>
 <h2>Password</h2>
-<input type="password" name="password" placeholder="Enter WiFi password (leave blank if open)">
+<div class="pw-wrap">
+<input type="password" name="password" id="pwInput" placeholder="Enter WiFi password (leave blank if open)">
+<button type="button" class="toggle-pw" id="pwToggle" onclick="togglePW()" aria-label="Toggle password visibility">👁️</button>
+</div>
 <button type="submit">📡 Connect & Reboot</button>
 </form>
 <div class="status">Connect to this WiFi, then select your network above</div>
@@ -51,6 +58,17 @@ async function scanNetworks() {
 }
 scanNetworks();
 setInterval(scanNetworks, 10000);
+function togglePW() {
+  const inp = document.getElementById('pwInput');
+  const btn = document.getElementById('pwToggle');
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    btn.textContent = '🙈';
+  } else {
+    inp.type = 'password';
+    btn.textContent = '👁️';
+  }
+}
 </script>
 </body>
 </html>

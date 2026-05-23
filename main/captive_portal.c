@@ -135,7 +135,7 @@ static void url_decode(char *dst, const char *src)
     while (*src) {
         if (*src == '%' && (a = src[1]) && (b = src[2])) {
             if (a >= 'a') a -= 'a' - 'A';
-            if (b >= 'a') b -= 'b' - 'A';
+            if (b >= 'a') b -= 'a' - 'A';
             *dst++ = ((a - (a >= 'A' ? 'A' - 10 : '0')) << 4) |
                       (b - (b >= 'A' ? 'A' - 10 : '0'));
             src += 3;
@@ -197,7 +197,7 @@ static esp_err_t configure_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Saving: SSID=\"%s\" Pass=\"***\"", ssid);
+    ESP_LOGI(TAG, "Saving: SSID=\"%s\" Pass_len=%d", ssid, (int)strlen(password));
 
     wifi_creds_t creds;
     strncpy(creds.ssid, ssid, sizeof(creds.ssid) - 1);
@@ -225,13 +225,46 @@ static esp_err_t configure_handler(httpd_req_t *req)
 
 /* ── HTTP URI definitions ───────────────────────────────────── */
 
+/* Redirect GET /configure → / so users don't get "method invalid" */
+static esp_err_t configure_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 static const httpd_uri_t root_uri = {
     .uri = "/", .method = HTTP_GET, .handler = config_root_handler,
 };
+static esp_err_t api_debug_creds_handler(httpd_req_t *req)
+{
+    wifi_creds_t creds;
+    esp_err_t err = wifi_manager_load_creds(&creds);
+    if (err != ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"status\":\"not_found\"}", 23);
+        return ESP_OK;
+    }
+    char json[128];
+    snprintf(json, sizeof(json),
+             "{\"ssid\":\"%s\",\"pass_len\":%d}",
+             creds.ssid, (int)strlen(creds.password));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json, strlen(json));
+    return ESP_OK;
+}
+
 static const httpd_uri_t scan_uri = {
     .uri = "/api/scan", .method = HTTP_GET, .handler = api_scan_handler,
 };
-static const httpd_uri_t configure_uri = {
+static const httpd_uri_t debug_creds_uri = {
+    .uri = "/api/debug-creds", .method = HTTP_GET, .handler = api_debug_creds_handler,
+};
+static const httpd_uri_t configure_get_uri = {
+    .uri = "/configure", .method = HTTP_GET, .handler = configure_get_handler,
+};
+static const httpd_uri_t configure_post_uri = {
     .uri = "/configure", .method = HTTP_POST, .handler = configure_handler,
 };
 
@@ -254,7 +287,9 @@ esp_err_t captive_portal_start(void)
 
     httpd_register_uri_handler(server, &root_uri);
     httpd_register_uri_handler(server, &scan_uri);
-    httpd_register_uri_handler(server, &configure_uri);
+    httpd_register_uri_handler(server, &debug_creds_uri);
+    httpd_register_uri_handler(server, &configure_get_uri);
+    httpd_register_uri_handler(server, &configure_post_uri);
 
     ESP_LOGI(TAG, "Captive portal ready: http://192.168.4.1");
     return ESP_OK;

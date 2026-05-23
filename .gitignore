@@ -1,2 +1,3 @@
 build/
 sdkconfig.old
+nvs_dump.bin
