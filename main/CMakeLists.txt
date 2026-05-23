@@ -1,6 +1,2 @@
-idf_component_register(
-    SRCS "main.c"
-    INCLUDE_DIRS "."
-    REQUIRES driver esp_wifi esp_http_server nvs_flash esp_event
-    PRIV_REQUIRES esp_driver_gpio freertos
-)
+idf_component_register(SRCS "main.c" "wifi_manager.c" "captive_portal.c"
+                    INCLUDE_DIRS ".")

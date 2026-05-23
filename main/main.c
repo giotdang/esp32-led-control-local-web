@@ -3,18 +3,15 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
 #include "esp_http_server.h"
 #include "nvs_flash.h"
-// #include "mdns.h"  // Not available in this IDF version
+
+#include "wifi_manager.h"
+#include "captive_portal.h"
 
 #define LED_PIN GPIO_NUM_2
-#define SSID "VDK19709_2G"
-#define PASSWORD "1973@Vdk@2020@"
 #define HOSTNAME "esp32-blink"
 
 static const char *TAG = "LED_WEB";
@@ -32,60 +29,8 @@ static led_state_t led_state = {
     .blink_interval_ms = 1000
 };
 
-// Event handlers
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGI(TAG, "WiFi disconnected, reconnecting...");
-        esp_wifi_connect();
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
-    }
-}
+// ── HTTP Server handlers ──────────────────────────────────────
 
-static void wifi_init_sta(void)
-{
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
-
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = SSID,
-            .password = PASSWORD,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
-    };
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-}
-
-// mDNS not available - will use IP address instead
-// static void mdns_init(void) { }
-
-// HTTP Server handlers
 static esp_err_t root_handler(httpd_req_t *req)
 {
     const char *html = "<!DOCTYPE html><html><head>"
@@ -95,6 +40,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; background: #f5f5f5; }"
         ".container { background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
         "h1 { color: #333; text-align: center; }"
+        ".ip-badge { text-align: center; font-size: 13px; color: #666; margin-bottom: 20px; }"
         ".mode-section { margin: 30px 0; }"
         ".mode-btn { padding: 12px 24px; margin: 10px 5px; font-size: 16px; border: none; border-radius: 5px; cursor: pointer; transition: all 0.3s; }"
         ".mode-btn.active { background: #4CAF50; color: white; }"
@@ -110,6 +56,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         ".slider::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: #4CAF50; cursor: pointer; border: none; }"
         ".slider-label { display: flex; justify-content: space-between; margin-top: 10px; font-size: 14px; color: #666; }"
         ".status { text-align: center; margin: 20px 0; padding: 10px; background: #e3f2fd; border-radius: 5px; font-weight: bold; }"
+        ".reset-link { display: block; text-align: center; margin-top: 20px; color: #999; font-size: 12px; }"
         "</style>"
         "</head><body>"
         "<div class='container'>"
@@ -131,11 +78,11 @@ static esp_err_t root_handler(httpd_req_t *req)
         "</div>"
         "</div>"
         "<div class='status' id='status'>🔄 Loading...</div>"
+        "<a href='/' class='reset-link' onclick='fetch(\"/api/reset-wifi\").then(()=>alert(\"WiFi reset! Reconnect to ESP32-Blink-Config\"))'>🔄 Reset WiFi Settings</a>"
         "</div>"
         "<script>"
         "let currentMode = 'manual';"
         "let isLedOn = false;"
-        "let serverState = {};"
         "async function setMode(mode) {"
         "  currentMode = mode;"
         "  document.getElementById('manualBtn').className = mode === 'manual' ? 'mode-btn active' : 'mode-btn inactive';"
@@ -152,7 +99,6 @@ static esp_err_t root_handler(httpd_req_t *req)
         "    await fetch('/api/led', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({state: isLedOn})});"
         "    await updateStatus();"
         "  } catch (e) {"
-        "    console.error('Error:', e);"
         "    isLedOn = !isLedOn;"
         "    updateToggleButton();"
         "  }"
@@ -172,7 +118,6 @@ static esp_err_t root_handler(httpd_req_t *req)
         "  try {"
         "    const resp = await fetch('/api/status');"
         "    const data = await resp.json();"
-        "    serverState = data;"
         "    const modeText = data.mode === 'manual' ? '🖱️ Manual Control' : '⚙️ Auto Mode (' + data.interval + 'ms)';"
         "    const ledText = data.led ? '🟢 LED ON' : '⚫ LED OFF';"
         "    document.getElementById('status').textContent = modeText + ' | ' + ledText;"
@@ -186,7 +131,6 @@ static esp_err_t root_handler(httpd_req_t *req)
         "    document.getElementById('frequencySlider').value = data.interval;"
         "    document.getElementById('freqValue').textContent = data.interval + 'ms';"
         "  } catch (e) {"
-        "    console.error('Status update failed:', e);"
         "    document.getElementById('status').textContent = '⚠️ Connection error';"
         "  }"
         "}"
@@ -276,60 +220,21 @@ static esp_err_t api_frequency_handler(httpd_req_t *req)
     return httpd_resp_send(req, "{\"status\":\"ok\"}", 16);
 }
 
-static httpd_handle_t start_web_server(void)
+static esp_err_t api_reset_wifi_handler(httpd_req_t *req)
 {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_open_sockets = 7;
-    httpd_handle_t server = NULL;
+    ESP_LOGW(TAG, "WiFi reset requested via API");
+    wifi_manager_clear_creds();
 
-    if (httpd_start(&server, &config) == ESP_OK) {
-        // Register URI handlers
-        httpd_uri_t root_uri = {
-            .uri = "/",
-            .method = HTTP_GET,
-            .handler = root_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &root_uri);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"status\":\"reset\",\"message\":\"Rebooting to AP mode\"}", 54);
 
-        httpd_uri_t status_uri = {
-            .uri = "/api/status",
-            .method = HTTP_GET,
-            .handler = api_status_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &status_uri);
-
-        httpd_uri_t mode_uri = {
-            .uri = "/api/mode",
-            .method = HTTP_POST,
-            .handler = api_mode_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &mode_uri);
-
-        httpd_uri_t led_uri = {
-            .uri = "/api/led",
-            .method = HTTP_POST,
-            .handler = api_led_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &led_uri);
-
-        httpd_uri_t freq_uri = {
-            .uri = "/api/frequency",
-            .method = HTTP_POST,
-            .handler = api_frequency_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &freq_uri);
-
-        ESP_LOGI(TAG, "Web server started");
-    }
-    return server;
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    esp_restart();
+    return ESP_OK;
 }
 
-// LED blink task
+// ── LED blink task ─────────────────────────────────────────────
+
 static void led_blink_task(void *pvParameter)
 {
     gpio_config_t io_conf = {};
@@ -352,8 +257,55 @@ static void led_blink_task(void *pvParameter)
     }
 }
 
+// ── Start main web server (after WiFi is connected) ────────────
+
+static httpd_handle_t start_web_server(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_open_sockets = 7;
+    httpd_handle_t server = NULL;
+
+    if (httpd_start(&server, &config) == ESP_OK) {
+        httpd_uri_t root_uri = {
+            .uri = "/", .method = HTTP_GET, .handler = root_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &root_uri);
+
+        httpd_uri_t status_uri = {
+            .uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &status_uri);
+
+        httpd_uri_t mode_uri = {
+            .uri = "/api/mode", .method = HTTP_POST, .handler = api_mode_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &mode_uri);
+
+        httpd_uri_t led_uri = {
+            .uri = "/api/led", .method = HTTP_POST, .handler = api_led_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &led_uri);
+
+        httpd_uri_t freq_uri = {
+            .uri = "/api/frequency", .method = HTTP_POST, .handler = api_frequency_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &freq_uri);
+
+        httpd_uri_t reset_wifi_uri = {
+            .uri = "/api/reset-wifi", .method = HTTP_GET, .handler = api_reset_wifi_handler, .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &reset_wifi_uri);
+
+        ESP_LOGI(TAG, "Web server started on port 80");
+    }
+    return server;
+}
+
+// ── Main entry ─────────────────────────────────────────────────
+
 void app_main(void)
 {
+    // Initialise NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -361,20 +313,37 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_LOGI(TAG, "Starting WiFi...");
-    wifi_init_sta();
+    // Initialise WiFi manager
+    wifi_manager_init();
 
-    vTaskDelay(3000 / portTICK_PERIOD_MS);
+    // Try loading saved credentials and connecting
+    wifi_creds_t creds;
+    ret = wifi_manager_load_creds(&creds);
 
-    // mDNS skipped - access via IP address
-    // ESP_LOGI(TAG, "Starting mDNS...");
-    // mdns_init();
+    if (ret == ESP_OK && strlen(creds.ssid) > 0) {
+        ESP_LOGI(TAG, "Found saved WiFi: \"%s\"", creds.ssid);
+        ret = wifi_manager_sta_connect(&creds, WIFI_STA_TIMEOUT_MS);
 
-    ESP_LOGI(TAG, "Starting HTTP server...");
-    start_web_server();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Connected! IP: %s", wifi_manager_get_ip_str());
 
-    ESP_LOGI(TAG, "Starting LED blink task...");
+            // Start LED blink task
+            xTaskCreate(led_blink_task, "led_blink_task", 2048, NULL, 5, NULL);
+
+            // Start main web server
+            start_web_server();
+            return;
+        }
+        ESP_LOGW(TAG, "STA failed, falling back to AP mode");
+    } else {
+        ESP_LOGI(TAG, "No saved WiFi credentials");
+    }
+
+    // Fallback to AP + captive portal
+    ESP_LOGI(TAG, "Starting AP mode + Captive Portal...");
+    wifi_manager_start_ap();
+    captive_portal_start();
+
+    // Still start LED blink task (so LED can indicate AP mode)
     xTaskCreate(led_blink_task, "led_blink_task", 2048, NULL, 5, NULL);
-
-    ESP_LOGI(TAG, "App started! Check serial for IP address, then access http://<IP>:80");
 }
