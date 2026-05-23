@@ -19,12 +19,24 @@ static const char *TAG = "CAPTIVE";
 static httpd_handle_t server = NULL;
 static int dns_sock = -1;
 
+// Embedded HTML file symbols (from EMBED_TXTFILES in CMakeLists.txt)
+extern const uint8_t wifi_config_html_start[]     asm("_binary_wifi_config_html_start");
+extern const uint8_t wifi_config_html_end[]       asm("_binary_wifi_config_html_end");
+extern const uint8_t configure_success_html_start[] asm("_binary_configure_success_html_start");
+extern const uint8_t configure_success_html_end[]   asm("_binary_configure_success_html_end");
+
+/* ── Helper: serve an embedded text file ─────────────────────── */
+
+static esp_err_t serve_embedded_html(httpd_req_t *req,
+                                     const uint8_t *start,
+                                     const uint8_t *end)
+{
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, (const char *)start, end - start);
+}
+
 /* ── DNS redirect (captive portal detection) ────────────────── */
 
-/**
- * Simple DNS server: respond to ANY query with the ESP's AP IP.
- * This tricks phones/laptops into showing the "login required" popup.
- */
 static void dns_task(void *pvParameters)
 {
     struct sockaddr_in dest_addr;
@@ -38,13 +50,16 @@ static void dns_task(void *pvParameters)
         return;
     }
 
+    int opt = 1;
+    setsockopt(dns_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
     struct sockaddr_in dns_addr = {
         .sin_family = AF_INET,
         .sin_port = htons(53),
         .sin_addr = { .s_addr = INADDR_ANY },
     };
     if (bind(dns_sock, (struct sockaddr *)&dns_addr, sizeof(dns_addr)) < 0) {
-        ESP_LOGE(TAG, "DNS: bind failed");
+        ESP_LOGE(TAG, "DNS: bind failed (port 53)");
         close(dns_sock);
         dns_sock = -1;
         vTaskDelete(NULL);
@@ -56,33 +71,25 @@ static void dns_task(void *pvParameters)
     while (1) {
         int len = recvfrom(dns_sock, buf, sizeof(buf), 0,
                            (struct sockaddr *)&dest_addr, &socklen);
-        if (len < 12) continue; // Too short for DNS header
+        if (len < 12) continue;
 
-        // Respond with the ESP's AP IP (192.168.4.1)
-        uint16_t id = (buf[0] << 8) | buf[1];
-        uint16_t flags = 0x8180; // Standard response, no error
         uint16_t qdcount = (buf[4] << 8) | buf[5];
-        uint16_t ancount = htons(1);
 
         // Build response header
         uint8_t resp[512];
         memset(resp, 0, sizeof(resp));
-        resp[0] = (id >> 8) & 0xFF;
-        resp[1] = id & 0xFF;
-        resp[2] = (flags >> 8) & 0xFF;
-        resp[3] = flags & 0xFF;
-        resp[4] = (qdcount >> 8) & 0xFF;
-        resp[5] = qdcount & 0xFF;
-        resp[6] = (ancount >> 8) & 0xFF;
-        resp[7] = ancount & 0xFF;
+        resp[0] = buf[0]; resp[1] = buf[1];  // Transaction ID
+        resp[2] = 0x81; resp[3] = 0x80;      // Standard response, no error
+        resp[4] = (qdcount >> 8) & 0xFF; resp[5] = qdcount & 0xFF;
+        resp[6] = 0x00; resp[7] = 0x01;      // 1 answer
 
         // Copy query section
         int qoff = 12;
         while (qoff < len && buf[qoff] != 0) qoff++;
-        qoff += 5; // Skip null terminator + QTYPE + QCLASS
+        qoff += 5; // Skip null + QTYPE(2) + QCLASS(2)
         memcpy(resp + 12, buf + 12, qoff - 12);
 
-        // Answer section: CNAME-like pointer to domain name
+        // Answer section: pointer to query name + A record
         int aoff = 12 + (qoff - 12);
         resp[aoff++] = 0xC0; resp[aoff++] = 12;  // Pointer to query name
         resp[aoff++] = 0x00; resp[aoff++] = 0x01; // Type A
@@ -100,14 +107,35 @@ static void dns_task(void *pvParameters)
 
 /* ── HTTP handlers ──────────────────────────────────────────── */
 
-/* Helper: URL-decode a string in-place */
+static esp_err_t config_root_handler(httpd_req_t *req)
+{
+    return serve_embedded_html(req,
+                               wifi_config_html_start,
+                               wifi_config_html_end);
+}
+
+static esp_err_t api_scan_handler(httpd_req_t *req)
+{
+    char *scan_json = wifi_manager_scan_networks();
+    if (!scan_json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Scan failed");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, scan_json, strlen(scan_json));
+    free(scan_json);
+    return ESP_OK;
+}
+
+/* URL-decode a string in-place */
 static void url_decode(char *dst, const char *src)
 {
     char a, b;
     while (*src) {
         if (*src == '%' && (a = src[1]) && (b = src[2])) {
             if (a >= 'a') a -= 'a' - 'A';
-            if (b >= 'a') b -= 'a' - 'A';
+            if (b >= 'a') b -= 'b' - 'A';
             *dst++ = ((a - (a >= 'A' ? 'A' - 10 : '0')) << 4) |
                       (b - (b >= 'A' ? 'A' - 10 : '0'));
             src += 3;
@@ -121,89 +149,7 @@ static void url_decode(char *dst, const char *src)
     *dst = '\0';
 }
 
-static esp_err_t config_root_handler(httpd_req_t *req)
-{
-    char *scan_json = wifi_manager_scan_networks();
-
-    const char *html_fmt =
-        "<!DOCTYPE html>"
-        "<html><head>"
-        "<meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>ESP32 WiFi Config</title>"
-        "<style>"
-        "body{font-family:Arial,sans-serif;max-width:500px;margin:40px auto;padding:20px;background:#f0f4f8}"
-        ".card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 12px rgba(0,0,0,0.1)}"
-        "h1{text-align:center;color:#1a1a2e;margin-top:0}"
-        "h2{color:#16213e;font-size:16px;margin-bottom:8px}"
-        "select,input[type=password]{width:100%%;padding:12px;margin:6px 0 16px;border:2px solid #e0e0e0;border-radius:8px;font-size:15px;box-sizing:border-box}"
-        "select:focus,input:focus{border-color:#0f3460;outline:none}"
-        "button{width:100%%;padding:14px;background:#0f3460;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:bold;cursor:pointer}"
-        "button:hover{background:#1a5276}"
-        ".status{text-align:center;color:#666;margin-top:12px;font-size:13px}"
-        ".rssi{color:#888;font-size:12px}"
-        "</style>"
-        "</head><body>"
-        "<div class='card'>"
-        "<h1>🔧 WiFi Configuration</h1>"
-        "<form action='/configure' method='POST'>"
-        "<h2>Select Network</h2>"
-        "<select name='ssid' required>"
-        "<option value=''>-- Scan networks --</option>";
-
-    // Build HTML string on heap
-    size_t html_len = strlen(html_fmt) + strlen(scan_json) * 128 + 2048;
-    char *html = malloc(html_len);
-    if (!html) {
-        free(scan_json);
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-
-    strcpy(html, html_fmt);
-
-    // Parse scan JSON and create <option>s
-    // JSON format: [{"ssid":"...","rssi":-50,"auth":3},...]
-    char *p = scan_json;
-    while (*p) {
-        char ssid[64] = "";
-        int rssi = 0, auth = 0;
-        if (sscanf(p, "{\"ssid\":\"%63[^\"]\",\"rssi\":%d,\"auth\":%d}",
-                   ssid, &rssi, &auth) == 3) {
-            if (strlen(ssid) > 0) {
-                char opt[256];
-                const char *lock = (auth >= 3) ? "🔒" : "🔓";
-                snprintf(opt, sizeof(opt),
-                    "<option value='%s'>%s %s <span class='rssi'>(%ddBm)</span></option>",
-                    ssid, lock, ssid, rssi);
-                strlcat(html, opt, html_len);
-            }
-        }
-        // Move to next
-        p = strchr(p + 1, '{');
-        if (!p) break;
-    }
-
-    char *tail =
-        "</select>"
-        "<h2>Password</h2>"
-        "<input type='password' name='password' placeholder='Enter WiFi password'>"
-        "<button type='submit'>📡 Connect & Reboot</button>"
-        "</form>"
-        "<div class='status'>Connect to this WiFi, then select your network above</div>"
-        "</div>"
-        "</body></html>";
-
-    strlcat(html, tail, html_len);
-    free(scan_json);
-
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_send(req, html, strlen(html));
-    free(html);
-    return ESP_OK;
-}
-
-static esp_err_t config_configure_handler(httpd_req_t *req)
+static esp_err_t configure_handler(httpd_req_t *req)
 {
     char content[256];
     int ret = httpd_req_recv(req, content, sizeof(content) - 1);
@@ -213,7 +159,7 @@ static esp_err_t config_configure_handler(httpd_req_t *req)
     }
     content[ret] = '\0';
 
-    ESP_LOGI(TAG, "Form data: %s", content);
+    ESP_LOGI(TAG, "Form data: %s (len=%d)", content, ret);
 
     // Parse form-urlencoded: ssid=XXX&password=YYY
     char ssid[WIFI_CREDS_SSID_MAX] = "";
@@ -232,14 +178,16 @@ static esp_err_t config_configure_handler(httpd_req_t *req)
         name[nlen] = '\0';
 
         const char *vstart = eq + 1;
-        int vlen = amp ? amp - vstart : strlen(vstart);
+        int vlen = amp ? (int)(amp - vstart) : (int)strlen(vstart);
         if (vlen >= (int)sizeof(value)) vlen = sizeof(value) - 1;
         strncpy(value, vstart, vlen);
         value[vlen] = '\0';
         url_decode(value, value);
 
-        if (strcmp(name, "ssid") == 0) strncpy(ssid, value, sizeof(ssid) - 1);
-        if (strcmp(name, "password") == 0) strncpy(password, value, sizeof(password) - 1);
+        if (strcmp(name, "ssid") == 0)
+            strncpy(ssid, value, sizeof(ssid) - 1);
+        if (strcmp(name, "password") == 0)
+            strncpy(password, value, sizeof(password) - 1);
 
         key = amp ? amp + 1 : NULL;
     }
@@ -249,7 +197,7 @@ static esp_err_t config_configure_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Saving: SSID=\"%s\" Pass=\"%s\"", ssid, password);
+    ESP_LOGI(TAG, "Saving: SSID=\"%s\" Pass=\"***\"", ssid);
 
     wifi_creds_t creds;
     strncpy(creds.ssid, ssid, sizeof(creds.ssid) - 1);
@@ -262,60 +210,36 @@ static esp_err_t config_configure_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    // Send success HTML with reboot instruction
-    const char *resp_html =
-        "<!DOCTYPE html><html><head>"
-        "<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<meta http-equiv='refresh' content='5'>"
-        "<style>"
-        "body{font-family:Arial,sans-serif;max-width:500px;margin:40px auto;padding:20px;background:#f0f4f8;text-align:center}"
-        ".card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 12px rgba(0,0,0,0.1)}"
-        ".check{font-size:64px;margin:16px 0;color:#27ae60}"
-        "</style>"
-        "</head><body>"
-        "<div class='card'>"
-        "<div class='check'>✅</div>"
-        "<h1>Configuration Saved!</h1>"
-        "<p>Rebooting in 3 seconds...</p>"
-        "<p>Please reconnect to <strong>%s</strong> after reboot</p>"
-        "</div></body></html>";
+    // Serve success page (the JS will read ssid from query param)
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_send(req,
+                    (const char *)configure_success_html_start,
+                    configure_success_html_end - configure_success_html_start);
 
-    size_t resp_len = strlen(resp_html) + strlen(ssid) + 64;
-    char *resp_buf = malloc(resp_len);
-    if (resp_buf) {
-        snprintf(resp_buf, resp_len, resp_html, ssid);
-        httpd_resp_set_type(req, "text/html; charset=utf-8");
-        httpd_resp_send(req, resp_buf, strlen(resp_buf));
-        free(resp_buf);
-    }
-
-    // Reboot after a short delay
+    // Reboot after delay
     vTaskDelay(3000 / portTICK_PERIOD_MS);
     ESP_LOGI(TAG, "Rebooting...");
     esp_restart();
-
     return ESP_OK;
 }
 
-/* ── Start / Stop ───────────────────────────────────────────── */
+/* ── HTTP URI definitions ───────────────────────────────────── */
 
 static const httpd_uri_t root_uri = {
-    .uri = "/",
-    .method = HTTP_GET,
-    .handler = config_root_handler,
-    .user_ctx = NULL,
+    .uri = "/", .method = HTTP_GET, .handler = config_root_handler,
+};
+static const httpd_uri_t scan_uri = {
+    .uri = "/api/scan", .method = HTTP_GET, .handler = api_scan_handler,
+};
+static const httpd_uri_t configure_uri = {
+    .uri = "/configure", .method = HTTP_POST, .handler = configure_handler,
 };
 
-static const httpd_uri_t configure_uri = {
-    .uri = "/configure",
-    .method = HTTP_POST,
-    .handler = config_configure_handler,
-    .user_ctx = NULL,
-};
+/* ── Start / Stop ───────────────────────────────────────────── */
 
 esp_err_t captive_portal_start(void)
 {
-    // Start DNS task
+    // Start DNS task (redirect all domains to ESP)
     xTaskCreate(dns_task, "dns_task", 4096, NULL, 5, NULL);
 
     // Start HTTP server
@@ -329,6 +253,7 @@ esp_err_t captive_portal_start(void)
     }
 
     httpd_register_uri_handler(server, &root_uri);
+    httpd_register_uri_handler(server, &scan_uri);
     httpd_register_uri_handler(server, &configure_uri);
 
     ESP_LOGI(TAG, "Captive portal ready: http://192.168.4.1");

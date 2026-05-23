@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="5">
+<title>Configuration Saved</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:500px;margin:40px auto;padding:20px;background:#f0f4f8;text-align:center}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 12px rgba(0,0,0,0.1)}
+.check{font-size:64px;margin:16px 0;color:#27ae60}
+.network{font-weight:bold;color:#0f3460}
+</style>
+</head>
+<body>
+<div class="card">
+<div class="check">✅</div>
+<h1>Configuration Saved!</h1>
+<p>Rebooting in 3 seconds...</p>
+<p>Please reconnect to <span class="network" id="networkName">your network</span> after reboot</p>
+</div>
+<script>
+const params = new URLSearchParams(window.location.search);
+const ssid = params.get('ssid');
+if (ssid) document.getElementById('networkName').textContent = ssid;
+</script>
+</body>
+</html>
