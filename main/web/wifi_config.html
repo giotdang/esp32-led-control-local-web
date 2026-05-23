@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 WiFi Config</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:500px;margin:40px auto;padding:20px;background:#f0f4f8}
+.card{background:#fff;border-radius:12px;padding:24px;box-shadow:0 2px 12px rgba(0,0,0,0.1)}
+h1{text-align:center;color:#1a1a2e;margin-top:0}
+h2{color:#16213e;font-size:16px;margin-bottom:8px}
+select{width:100%;padding:12px;margin:6px 0 16px;border:2px solid #e0e0e0;border-radius:8px;font-size:15px;box-sizing:border-box}
+select:focus{border-color:#0f3460;outline:none}
+.pw-wrap{position:relative;margin-bottom:16px}
+.pw-wrap input{width:100%;padding:12px;padding-right:44px;border:2px solid #e0e0e0;border-radius:8px;font-size:15px;box-sizing:border-box}
+.pw-wrap input:focus{border-color:#0f3460;outline:none}
+.toggle-pw{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;font-size:20px;cursor:pointer;padding:4px;line-height:1;color:#888;width:auto;border-radius:0}
+.toggle-pw:hover{color:#333;background:none}
+button{width:100%;padding:14px;background:#0f3460;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:bold;cursor:pointer}
+button:hover{background:#1a5276}
+.status{text-align:center;color:#666;margin-top:12px;font-size:13px},
+</style>
+</head>
+<body>
+<div class="card">
+<h1>🔧 WiFi Configuration</h1>
+<form action="/configure" method="POST">
+<h2>Select Network</h2>
+<select name="ssid" id="ssidSelect" required>
+<option value="">-- Scanning networks... --</option>
+</select>
+<h2>Password</h2>
+<div class="pw-wrap">
+<input type="password" name="password" id="pwInput" placeholder="Enter WiFi password (leave blank if open)">
+<button type="button" class="toggle-pw" id="pwToggle" onclick="togglePW()" aria-label="Toggle password visibility">👁️</button>
+</div>
+<button type="submit">📡 Connect & Reboot</button>
+</form>
+<div class="status">Connect to this WiFi, then select your network above</div>
+</div>
+<script>
+async function scanNetworks() {
+  try {
+    const resp = await fetch('/api/scan');
+    const networks = await resp.json();
+    const select = document.getElementById('ssidSelect');
+    select.innerHTML = '';
+    networks.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n.ssid;
+      const lock = n.auth >= 3 ? '🔒' : '🔓';
+      opt.textContent = `${lock} ${n.ssid} (${n.rssi}dBm)`;
+      select.appendChild(opt);
+    });
+  } catch(e) {
+    document.getElementById('ssidSelect').innerHTML = '<option value="">-- Scan failed, refresh page --</option>';
+  }
+}
+scanNetworks();
+setInterval(scanNetworks, 10000);
+function togglePW() {
+  const inp = document.getElementById('pwInput');
+  const btn = document.getElementById('pwToggle');
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    btn.textContent = '🙈';
+  } else {
+    inp.type = 'password';
+    btn.textContent = '👁️';
+  }
+}
+</script>
+</body>
+</html>
